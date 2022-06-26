@@ -131,6 +131,11 @@
           <span class="site-state-item-name">日志</span>
         </a>
       </div>
+      <div class="site-state-item site-state-tags">
+          <a href="/tags/">
+        <span class="site-state-item-count">3</span>
+        <span class="site-state-item-name">标签</span></a>
+      </div>
   </nav>
 </div>
   <div class="links-of-author site-overview-item animated">
@@ -214,7 +219,7 @@
         <i class="far fa-calendar-check"></i>
       </span>
       <span class="post-meta-item-text">更新于</span>
-      <time title="修改时间：2022-06-19 17:13:51" itemprop="dateModified" datetime="2022-06-19T17:13:51+08:00">2022-06-19</time>
+      <time title="修改时间：2022-06-26 21:09:02" itemprop="dateModified" datetime="2022-06-26T21:09:02+08:00">2022-06-26</time>
     </span>
 
   
@@ -249,63 +254,15 @@
     
     
     <div class="post-body" itemprop="articleBody">
-          <p>在<a target="_blank" rel="noopener" href="https://tech.xiaomi.com/#/pc/article-detail?id=15440">Spark MLlib分类模型评估最佳实践</a>一文里，我们实践了分类模型评估器BinaryClassificationMetrics的使用。但它是如何做到这么高效的构建混淆矩阵以及评估不同指标的，分箱是怎么回事？ 等等，我们还不太清楚。  本文就从源码角度分析其实现细节</p>
-<h1 id="为什么要了解评估器"><a href="#为什么要了解评估器" class="headerlink" title="为什么要了解评估器"></a>为什么要了解评估器</h1><p>​         我们知道分类模型的准召率是衡量模型好坏很重要的指标，这两个指标在某种程度上是彼此矛盾的，一般情况高查准率意味着低召回率，反之亦然。不同的应用场景，我们需要对准召率做一个权衡，对于逻辑回归这类输出概率的分类模型来说，调整阈值即可平衡准召率。每给定一个阈值，就去算一个准召率未免太麻烦，然而利用SparkMLlib内置的模型评估器就可以快速批量计算不同阈值下的准召率。 就像我们在<a target="_blank" rel="noopener" href="https://tech.xiaomi.com/#/pc/article-detail?id=15440">Spark MLlib分类模型评估最佳实践</a>一文里说的，如果不了解是怎么实现的，那么在使用过程中它输出的结果可能会令人困惑。这篇文章会详细讲解它的实现思想以及源码，并用图解的方式直观展现。</p>
-<h1 id="设计评估器？"><a href="#设计评估器？" class="headerlink" title="设计评估器？"></a>设计评估器？</h1><p>​         要设计评估器，我们首先要理清楚评估器主要负责什么，它的输入、输出分别是什么？与模型之间有什么关系。 粗略的看，模型、评估器、指标之间是这么个关系：</p>
-<p><img src="https://piggo-picture.oss-cn-hangzhou.aliyuncs.com/%E6%B5%81%E7%A8%8B%E5%9B%BE.jpg" alt="流程图"></p>
-<p>但其实评估器不关心模型具体是什么模型，模型只要把样本阳性”概率”给出来，再定一个阈值就完事儿了。评估器拿阈值和”概率”算出预测标签和实际标签对比构建<strong>混淆矩阵</strong>，然后你要什么指标，就传给评估器对应指标的公式，然后评估器就可以算出指标了。但是作为一个成熟的评估器，这些公式不应该用户传，最好是内置，只暴露API就行。</p>
-<blockquote>
-<p>这里概率加引号，是因为有些场景，模型输出的概率并非通常意义下的概率，它不代表可能性。</p>
-</blockquote>
-<p>这么一想，它们之间的关系应该是下面这样：</p>
-<p><img src="https://piggo-picture.oss-cn-hangzhou.aliyuncs.com/%E6%B5%81%E7%A8%8B%E5%9B%BE%20(1).jpg" alt="流程图 (1)"></p>
-<p>综上： </p>
-<ol>
-<li>评估器的输入是模型预测的概率和对应真实的标签</li>
-<li>评估器内置各种指标的计算公式</li>
-<li>评估器选择不同阈值，构造不同的混淆矩阵，根据公式计算相应指标</li>
-</ol>
-<p>这里的难点是第三点，阈值怎么选？如何快速构建混淆矩阵？我们看Spark是如何实现的</p>
-<h1 id="源码解读"><a href="#源码解读" class="headerlink" title="源码解读"></a>源码解读</h1><h2 id="整体框架"><a href="#整体框架" class="headerlink" title="整体框架"></a>整体框架</h2><p>首先，我们看这些指标的API，大多没有参数，且内部都调用了createCurve接口，只是参数不同：</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br></pre></td><td class="code"><pre><span class="line">  <span class="keyword">val</span> metrics = <span class="keyword">new</span> <span class="type">BinaryClassificationMetrics</span>(predictionAndLabel)</span><br><span class="line"></span><br><span class="line">  <span class="function"><span class="keyword">def</span> <span class="title">fMeasureByThreshold</span></span>(): <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)] = fMeasureByThreshold(<span class="number">1.0</span>)</span><br><span class="line"></span><br><span class="line"><span class="meta">@Since</span>(<span class="string">&quot;1.0.0&quot;</span>)</span><br><span class="line">  <span class="function"><span class="keyword">def</span> <span class="title">fMeasureByThreshold</span></span>(beta: <span class="type">Double</span>): <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)] = createCurve(<span class="type">FMeasure</span>(beta))</span><br><span class="line">  <span class="comment">/**</span></span><br><span class="line"><span class="comment">   * Returns the (threshold, precision) curve.</span></span><br><span class="line"><span class="comment">   */</span></span><br><span class="line">  <span class="meta">@Since</span>(<span class="string">&quot;1.0.0&quot;</span>)</span><br><span class="line">  <span class="function"><span class="keyword">def</span> <span class="title">precisionByThreshold</span></span>(): <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)] = createCurve(<span class="type">Precision</span>)</span><br><span class="line"></span><br><span class="line">  <span class="comment">/**</span></span><br><span class="line"><span class="comment">   * Returns the (threshold, recall) curve.</span></span><br><span class="line"><span class="comment">   */</span></span><br><span class="line">  <span class="meta">@Since</span>(<span class="string">&quot;1.0.0&quot;</span>)</span><br><span class="line">  <span class="function"><span class="keyword">def</span> <span class="title">recallByThreshold</span></span>(): <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)] = createCurve(<span class="type">Recall</span>)</span><br></pre></td></tr></table></figure>
-
-<p>我们还发现createCurve的返回结果就是指标，没有多余的逻辑，createCurve源码如下：</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">private</span> <span class="function"><span class="keyword">def</span> <span class="title">createCurve</span></span>(y: <span class="type">BinaryClassificationMetricComputer</span>): <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)] = &#123;</span><br><span class="line"></span><br><span class="line">  confusions.map &#123; <span class="keyword">case</span> (s, c) =&gt;<span class="comment">//这里的confusions一会儿我们会发现它就是混淆矩阵</span></span><br><span class="line"></span><br><span class="line">    (s, y(c))</span><br><span class="line"></span><br><span class="line">  &#125;</span><br><span class="line"></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
-
-<p>先看参数： 发现它接受一个BinaryClassificationMetricComputer类型的参数，实际上上面三个参数类型都是它的子类型:</p>
-<p><img src="https://xiaomi.f.mioffice.cn/space/api/box/stream/download/asynccode/?code=M2JlZDU3NTYzNDc1ZjZkMzNiNWQ2ZjZmY2M4NzgzMzRfZlpQaHUzVWRIV2ZWdTIxRndINE9sOGszOVdzZmxQcmNfVG9rZW46Ym94azRHYUNsNWV6QUwycGJYdkdlUmQ5b3VoXzE2NTU2Mjk4Mjg6MTY1NTYzMzQyOF9WNA" alt="img"></p>
-<p>从它们的名字看，这不就是指标计算公式嘛！接下来我们以精确率的计算为例来解读。先看Precision参数：</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">private</span>[evaluation] <span class="class"><span class="keyword">object</span> <span class="title">Precision</span> <span class="keyword">extends</span> <span class="title">BinaryClassificationMetricComputer</span> </span>&#123;</span><br><span class="line">  <span class="keyword">override</span> <span class="function"><span class="keyword">def</span> <span class="title">apply</span></span>(c: <span class="type">BinaryConfusionMatrix</span>): <span class="type">Double</span> = &#123;</span><br><span class="line">   <span class="comment">// totalPositives = TP + FP</span></span><br><span class="line">    <span class="keyword">val</span> totalPositives = c.weightedTruePositives + c.weightedFalsePositives</span><br><span class="line">    <span class="keyword">if</span> (totalPositives == <span class="number">0.0</span>) &#123;</span><br><span class="line">      <span class="number">1.0</span></span><br><span class="line">    &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">      <span class="comment">// Precision = TP / (TP + FP)</span></span><br><span class="line">      c.weightedTruePositives / totalPositives</span><br><span class="line">    &#125;</span><br><span class="line">  &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
-
-<p>和我们想的一样，它正是精确率计算公式，而它的参数就是混淆矩阵。再联想到precisionByThreshold返回的RDD，第一列是threshold，第二列是precision；这样confusions的结构就清晰了：它的第一列是阈值threshold,第二列是该阈值对应的混淆矩阵。</p>
-<h2 id="增量构建混淆矩阵源码解读"><a href="#增量构建混淆矩阵源码解读" class="headerlink" title="增量构建混淆矩阵源码解读"></a>增量构建混淆矩阵源码解读</h2><p>我们直接看confusion的构建源码， 重点看红色注释</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br><span class="line">64</span><br><span class="line">65</span><br><span class="line">66</span><br><span class="line">67</span><br><span class="line">68</span><br><span class="line">69</span><br><span class="line">70</span><br><span class="line">71</span><br><span class="line">72</span><br><span class="line">73</span><br><span class="line">74</span><br><span class="line">75</span><br><span class="line">76</span><br><span class="line">77</span><br><span class="line">78</span><br><span class="line">79</span><br><span class="line">80</span><br><span class="line">81</span><br><span class="line">82</span><br><span class="line">83</span><br><span class="line">84</span><br><span class="line">85</span><br><span class="line">86</span><br><span class="line">87</span><br><span class="line">88</span><br><span class="line">89</span><br><span class="line">90</span><br><span class="line">91</span><br><span class="line">92</span><br><span class="line">93</span><br></pre></td><td class="code"><pre><span class="line">confusions: <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">BinaryConfusionMatrix</span>)]) = &#123;</span><br><span class="line">    <span class="comment">// Create a bin for each distinct score value, count weighted positives and</span></span><br><span class="line">    <span class="comment">// negatives within each bin, and then sort by score values in descending order.</span></span><br><span class="line">   <span class="comment">//按照预测概率值分组聚合</span></span><br><span class="line">   <span class="comment">//(score, BinaryLabelCounter) 每个预测值(降序排列)，都统计其正负样本数,是根据label计算的</span></span><br><span class="line">    <span class="keyword">val</span> counts = scoreLabelsWeight.combineByKey(</span><br><span class="line">      createCombiner = (labelAndWeight: (<span class="type">Double</span>, <span class="type">Double</span>)) =&gt;</span><br><span class="line">       <span class="comment">//统计正样本数， 负样本数</span></span><br><span class="line">        <span class="keyword">new</span> <span class="type">BinaryLabelCounter</span>(<span class="number">0.0</span>, <span class="number">0.0</span>) += (labelAndWeight._1, labelAndWeight._2),</span><br><span class="line">      mergeValue = (c: <span class="type">BinaryLabelCounter</span>, labelAndWeight: (<span class="type">Double</span>, <span class="type">Double</span>)) =&gt;</span><br><span class="line">        c += (labelAndWeight._1, labelAndWeight._2),</span><br><span class="line">      mergeCombiners = (c1: <span class="type">BinaryLabelCounter</span>, c2: <span class="type">BinaryLabelCounter</span>) =&gt; c1 += c2</span><br><span class="line">    ).sortByKey(ascending = <span class="literal">false</span>) <span class="comment">//保证了分区内和分区间都有序</span></span><br><span class="line"></span><br><span class="line">   <span class="comment">// binnedCounts的数量跟numBins有关</span></span><br><span class="line">    <span class="keyword">val</span> binnedCounts =</span><br><span class="line">      <span class="comment">// ==0不分箱</span></span><br><span class="line">      <span class="keyword">if</span> (numBins == <span class="number">0</span>) &#123;</span><br><span class="line">        <span class="comment">// 如果numBins==0也就是不分箱，则binnedCounts就是所有不同的预测值，这也就是为什么我们不分箱时，产生的结果非常大的原因。强烈建议分箱！</span></span><br><span class="line">        counts</span><br><span class="line">      &#125; <span class="keyword">else</span> &#123;<span class="comment">//分箱</span></span><br><span class="line">        <span class="keyword">val</span> countsSize = counts.count()<span class="comment">//预测值去重后的个数</span></span><br><span class="line">        <span class="comment">// Group the iterator into chunks of about countsSize / numBins points,</span></span><br><span class="line">        <span class="comment">// so that the resulting number of bins is about numBins</span></span><br><span class="line">        <span class="comment">//每个箱子的大小</span></span><br><span class="line">        <span class="keyword">val</span> grouping = countsSize / numBins</span><br><span class="line">        <span class="keyword">if</span> (grouping &lt; <span class="number">2</span>) &#123;</span><br><span class="line">          <span class="comment">// numBins was more than half of the size; no real point in down-sampling to bins</span></span><br><span class="line">          logInfo(<span class="string">s&quot;Curve is too small (<span class="subst">$countsSize</span>) for <span class="subst">$numBins</span> bins to be useful&quot;</span>)</span><br><span class="line">          counts</span><br><span class="line">        &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">          <span class="comment">//注意到mapPartitions的调用，这里是每个分区都这么分箱，这也解释了，为什么不对参数RDD重分区时，结果集可能会超出分箱参数的原因</span></span><br><span class="line">          counts.mapPartitions &#123; iter =&gt;</span><br><span class="line">            <span class="keyword">if</span> (iter.hasNext) &#123;</span><br><span class="line">              <span class="keyword">var</span> score = <span class="type">Double</span>.<span class="type">NaN</span></span><br><span class="line">              <span class="keyword">var</span> agg = <span class="keyword">new</span> <span class="type">BinaryLabelCounter</span>()</span><br><span class="line">              <span class="keyword">var</span> cnt = <span class="number">0</span>L</span><br><span class="line">              iter.flatMap &#123; pair =&gt;</span><br><span class="line">                score = pair._1</span><br><span class="line">                agg += pair._2</span><br><span class="line">                cnt += <span class="number">1</span></span><br><span class="line">                <span class="keyword">if</span> (cnt == grouping) &#123;</span><br><span class="line">                  <span class="comment">/** 箱子最后一个预测值是这个箱子的最小的预测值，超过这个预测值的都被累计了</span></span><br><span class="line"><span class="comment">                  ret的第一列时该分区内的阈值，agg是对应的混淆矩阵；</span></span><br><span class="line"><span class="comment">                  */</span></span><br><span class="line">                  <span class="keyword">val</span> ret = (score, agg)</span><br><span class="line">                  <span class="comment">//清空计数器，返回混淆矩阵</span></span><br><span class="line">                  agg = <span class="keyword">new</span> <span class="type">BinaryLabelCounter</span>()</span><br><span class="line">                  cnt = <span class="number">0</span></span><br><span class="line">                  <span class="type">Some</span>(ret)</span><br><span class="line">                &#125; <span class="keyword">else</span> <span class="type">None</span></span><br><span class="line">              &#125; ++ &#123;</span><br><span class="line">                <span class="keyword">if</span> (cnt &gt; <span class="number">0</span>) &#123;</span><br><span class="line">                  <span class="type">Iterator</span>.single((score, agg))</span><br><span class="line">                &#125; <span class="keyword">else</span> <span class="type">Iterator</span>.empty</span><br><span class="line">              &#125;</span><br><span class="line">            &#125; <span class="keyword">else</span> <span class="type">Iterator</span>.empty</span><br><span class="line">          &#125;</span><br><span class="line">        &#125;</span><br><span class="line">      &#125;</span><br><span class="line">  <span class="comment">//计算每个分区的统计值</span></span><br><span class="line">   <span class="keyword">val</span> agg = binnedCounts.values.mapPartitions &#123; iter =&gt;</span><br><span class="line">    <span class="keyword">val</span> agg = <span class="keyword">new</span> <span class="type">BinaryLabelCounter</span>()</span><br><span class="line">    <span class="comment">//这里的实现其实就是正负样本累加</span></span><br><span class="line">      iter.foreach(agg += _)</span><br><span class="line">      <span class="type">Iterator</span>(agg)</span><br><span class="line">    &#125;.collect()  <span class="comment">//把每个分区的计数收集到一起</span></span><br><span class="line">   </span><br><span class="line">   <span class="comment">//计算分区间累加的统计值</span></span><br><span class="line">   <span class="comment">//scanLeft产生了一个数组，聚合所有分区的计数，长度是分区数+1</span></span><br><span class="line">    <span class="keyword">val</span> partitionwiseCumulativeCounts =</span><br><span class="line">      agg.scanLeft(<span class="keyword">new</span> <span class="type">BinaryLabelCounter</span>())((agg, c) =&gt; agg.clone() += c)</span><br><span class="line">   </span><br><span class="line">    <span class="keyword">val</span> totalCount = partitionwiseCumulativeCounts.last</span><br><span class="line">    logInfo(<span class="string">s&quot;Total counts: <span class="subst">$totalCount</span>&quot;</span>)</span><br><span class="line">   </span><br><span class="line">   <span class="comment">//part内累积：每个score先整体累加前一个part，在累加part内其他score的</span></span><br><span class="line">    <span class="keyword">val</span> cumulativeCounts = binnedCounts.mapPartitionsWithIndex(</span><br><span class="line">      (index: <span class="type">Int</span>, iter: <span class="type">Iterator</span>[(<span class="type">Double</span>, <span class="type">BinaryLabelCounter</span>)]) =&gt; &#123;</span><br><span class="line">        <span class="comment">//先累加上一个分区的统计值， 再逐个累加本分区内所有箱子的统计值</span></span><br><span class="line">        <span class="keyword">val</span> cumCount = partitionwiseCumulativeCounts(index)</span><br><span class="line">        iter.map &#123; <span class="keyword">case</span> (score, c) =&gt;</span><br><span class="line">          cumCount += c</span><br><span class="line">          (score, cumCount.clone())</span><br><span class="line">        &#125;</span><br><span class="line">      &#125;, preservesPartitioning = <span class="literal">true</span>)</span><br><span class="line">    cumulativeCounts.persist()</span><br><span class="line">   <span class="comment">//计算混淆矩阵， 有了混淆矩阵，那些指标根据我们传的公式就可以计算指标了</span></span><br><span class="line">    <span class="keyword">val</span> confusions = cumulativeCounts.map &#123; <span class="keyword">case</span> (score, cumCount) =&gt;</span><br><span class="line">      (score, <span class="type">BinaryConfusionMatrixImpl</span>(cumCount, totalCount).asInstanceOf[<span class="type">BinaryConfusionMatrix</span>])</span><br><span class="line">    &#125;</span><br><span class="line">    (cumulativeCounts, confusions)</span><br><span class="line">  &#125;</span><br></pre></td></tr></table></figure>
-
-<h2 id="图解混淆矩阵增量构建过程"><a href="#图解混淆矩阵增量构建过程" class="headerlink" title="图解混淆矩阵增量构建过程"></a>图解混淆矩阵增量构建过程</h2><p>分箱之前，先构造了每个预测值对应的正负样本统计：</p>
-<p><img src="https://piggo-picture.oss-cn-hangzhou.aliyuncs.com/%E6%B5%81%E7%A8%8B%E5%9B%BE%20(2).jpg" alt="流程图 (2)"></p>
-<p>当数据量很大时，模型预测结果(score)通常也很大，如果不分箱，计算结果将非常大！</p>
-<p>分箱时，先计算每个箱子的大小，然后每个分区都进行分箱操作，每个箱子计算一个(预测值，样本统计)</p>
-<p>预测值取最后一个预测值，由于事先是按降序排序的，所以这个预测值是当前最小的那个预测值，也就是说超过这个值的正负样本已经分好箱了。</p>
-<p><img src="https://piggo-picture.oss-cn-hangzhou.aliyuncs.com/%E6%B5%81%E7%A8%8B%E5%9B%BE%20(3).jpg" alt="流程图 (3)"></p>
-<p>针对分箱后的结果，我们希望每个箱子都构建一个对应的全集的混淆矩阵，由于我们事先对数据进行了全局排序， 只需要逐个累加每个箱子：累加一个箱子后的混淆矩阵，其阈值也就是预测值是该箱子对应的预测值，正负样本统计值是大于该阈值的所有箱子的统计值累加。 这个累加的过程设计的比较巧妙：</p>
-<p>先计算一个中间结果：</p>
-<ol>
-<li>每个分区内的箱子先分区内聚合， 对应代码中的agg</li>
-<li>再按照分区依次聚合,对应代码中的partitionwiseCumulativeCounts</li>
-</ol>
-<p>当要计算累加某个箱子时，先从中间结果中查找该箱子所在分区的上一个分区的统计值，然后遍历当前分区的箱子并逐个累加，最后一个箱子的预测值就是当前混淆矩阵的阈值，累加结果就是该箱子对应的混淆矩阵。</p>
-<p>图解如下：</p>
-<p><img src="https://piggo-picture.oss-cn-hangzhou.aliyuncs.com/%E6%B5%81%E7%A8%8B%E5%9B%BE%20(4).jpg" alt="流程图 (4)"></p>
-<p>至此，完成了混淆矩阵组的构建</p>
-<h2 id="指标计算"><a href="#指标计算" class="headerlink" title="指标计算"></a>指标计算</h2><p>其实完成了混淆矩阵组的构建，计算指标就非常简单，由上面提到的</p>
-<p>BinaryClassificationMetricComputer负责计算，例如准确率:</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">private</span>[evaluation] <span class="class"><span class="keyword">object</span> <span class="title">Precision</span> <span class="keyword">extends</span> <span class="title">BinaryClassificationMetricComputer</span> </span>&#123;</span><br><span class="line">  <span class="keyword">override</span> <span class="function"><span class="keyword">def</span> <span class="title">apply</span></span>(c: <span class="type">BinaryConfusionMatrix</span>): <span class="type">Double</span> = &#123;</span><br><span class="line">    <span class="keyword">val</span> totalPositives = c.weightedTruePositives + c.weightedFalsePositives</span><br><span class="line">    <span class="keyword">if</span> (totalPositives == <span class="number">0.0</span>) &#123;</span><br><span class="line">      <span class="number">1.0</span></span><br><span class="line">    &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">      c.weightedTruePositives / totalPositives</span><br><span class="line">    &#125;</span><br><span class="line">  &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
-
-<h1 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h1><ol>
-<li>BinaryClassificationMetrics的实现最大的计算量是排序过程，分箱之后，每个混淆矩阵的计算都非常简单，不断复用前面的统计结果，这是整个过程高效的主要原因。</li>
-<li>不分箱会导致计算量和计算结果巨大，因此Spark对指标结果也设计为RDD。当然，除非数据量本身就比较小，可以不分箱，大多数情况下建议分箱</li>
-</ol>
-
+          <p>图文拆解模型评估器实现原理</p>
+          <!--noindex-->
+            <div class="post-button">
+              <a class="btn" href="/2022/06/07/Spark-MLlib%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90-%E4%B8%80-%E6%A8%A1%E5%9E%8B%E8%AF%84%E4%BC%B0%E5%99%A8%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86/">
+                阅读全文 &raquo;
+              </a>
+            </div>
+          <!--/noindex-->
+        
       
     </div>
 
@@ -367,7 +324,7 @@
         <i class="far fa-calendar-check"></i>
       </span>
       <span class="post-meta-item-text">更新于</span>
-      <time title="修改时间：2022-06-19 17:07:40" itemprop="dateModified" datetime="2022-06-19T17:07:40+08:00">2022-06-19</time>
+      <time title="修改时间：2022-06-26 21:09:02" itemprop="dateModified" datetime="2022-06-26T21:09:02+08:00">2022-06-26</time>
     </span>
 
   
@@ -402,180 +359,15 @@
     
     
     <div class="post-body" itemprop="articleBody">
-          <p>​       最近在做家庭识别模型，考虑到Spark强大的生态，选择了Spark MLlib开发和评估模型；尤其在使用它封装好的评估器BinaryClassificationMetrics时，遇到一些比较困惑的输出。经过实验得出了最佳实践，这里记录下来，需要的同学可以参考；</p>
-<p>本文要写的一些要点：</p>
-<ol>
-<li>如何评价一个分类模型的好坏？分类模型有哪些指标？</li>
-<li>混淆矩阵</li>
-<li>如何利用Spark MLlib快速输出模型指标并选择最优模型？</li>
-</ol>
-<h1 id="分类模型评价指标"><a href="#分类模型评价指标" class="headerlink" title="分类模型评价指标"></a>分类模型评价指标</h1><h2 id="精确率与召回率"><a href="#精确率与召回率" class="headerlink" title="精确率与召回率"></a>精确率与召回率</h2><p>精确率与召回率多用于二分类问题。精确率（Precision）指的是模型判为正的所有样本中有多少是真正的正样本；召回率（Recall）指的是所有正样本有多少被模型判为正样本，即召回。设模型输出的正样本集合为AA，真正的正样本集合为BB，则有：<br>$$<br>Precision(A,B)&#x3D;‖A⋂B‖&#x2F;‖A‖,Recall(A,B)&#x3D;‖A⋂B‖&#x2F;‖B‖<br>$$</p>
-<p>有时候我们需要在精确率与召回率间进行权衡，一种选择是画出精确率-召回率曲线（Precision-Recall Curve），曲线下的面积被称为AP分数（Average precision score）；另外一种选择是计算Fβ分数（即精确率和召回率的调和平均值）：<br>$$<br>Fβ&#x3D;(1+β2)⋅precision⋅recall&#x2F;(β2⋅precision+recall)<br>$$</p>
-<p>当β&#x3D;1称为F1分数，是分类与信息检索中最常用的指标之一。</p>
-<h2 id="混淆矩阵"><a href="#混淆矩阵" class="headerlink" title="混淆矩阵"></a>混淆矩阵</h2><p>又被称为错误矩阵，通过它可以直观地观察到算法的效果。它的每一列是样本的预测分类，每一行是样本的真实分类（反过来也可以），顾名思义，它反映了分类结果的混淆程度。混淆矩阵i行j列的原始是原本是类别i却被分为类别j的样本个数，计算完之后还可以对之进行可视化：</p>
-<p><img src="https://piggo-picture.oss-cn-hangzhou.aliyuncs.com/sphx_glr_plot_confusion_matrix_001.png" alt="ROC曲线"></p>
-<p>针对二分类，混淆矩阵</p>
-<p><img src="https://piggo-picture.oss-cn-hangzhou.aliyuncs.com/9686a1f19149fe16eb4b6b383904d086-20220603101835605.png" alt="img"></p>
-<p>混淆矩阵我们可以得到很多指标：</p>
-<p><strong>真阳性率</strong>(<strong>TPR</strong>)**&#x3D;TP&#x2F;(TP+FN)**：实际为阳性预测也为阳性的比例。也称灵敏度(Sensitivity)、召回率（Recall）；</p>
-<p><strong>假阳性率</strong>(<strong>FPR</strong>)**&#x3D;FP&#x2F;(FP+TN)**：实际为阴性但预测为阳性的比例；</p>
-<p><strong>真阴性率</strong>(<strong>TNR</strong>)**&#x3D;TN&#x2F;(FP+TN)**：实际为阴性预测也为阴性的比例。也称为特异度（Specificity）；</p>
-<p><strong>假阴性率</strong>(<strong>FNR</strong>)**&#x3D;FN&#x2F;(TP+FN)**：实际为阳性但预测为阴性的比例；</p>
-<p><strong>准确率</strong>(<strong>ACC</strong>)**&#x3D;(TP+TN)&#x2F;(TP+FP+FN+TN)**：预测正确的比例；</p>
-<p><strong>阳性预测值</strong>(<strong>PPV</strong>)**&#x3D;TP&#x2F;(TP+FP)**：预测为阳性的结果中实际为阳性的比例。也称精准率(Precision)；</p>
-<p><strong>阴性预测值</strong>(<strong>NPV</strong>)**&#x3D;TN&#x2F;(FN+TN)**：预测为阴性的结果中实际为阴性的比例。</p>
-<p>ROC曲线是以灵敏度为纵坐标、（1-特异度）为横坐标绘制的曲线。灵敏度（Sensitivity）即真阳性率（TPR），特异度（Specificity）即为真阴性率（TNR），（1-特异度）就是（1-TNR）&#x3D;FPR，所以ROC曲线横坐标值是假阳性率（FPR），而纵坐标值是真阳性率（TPR）。</p>
-<h2 id="roc"><a href="#roc" class="headerlink" title="roc"></a>roc</h2><h3 id="roc空间"><a href="#roc空间" class="headerlink" title="roc空间"></a>roc空间</h3><p>ROC空间是一个以伪阳性率(FPR, false positive rate)为X轴，真阳性率(TPR, true positive rate)为Y轴的二维坐标系所代表平面。</p>
-<ul>
-<li>TPR: 真阳性率，所有阳性样本中(TP+FN)，被分类器正确判断为阳的比例。<br>TPR &#x3D; TP &#x2F; (TP + FN) &#x3D; TP &#x2F; 所有真实值为阳性的样本个数</li>
-<li>FPR: 假阳性率，所有阴性样本中(FP+TN)，被分类器错误判断为阳的比例。<br>FPR &#x3D; FP &#x2F; (FP + TN) &#x3D; FP &#x2F; 所有真实值为阴性的样本个数</li>
-</ul>
-<p>预测为阳的样本中，TP将产生 TPR 的收益， FP将产生FPR的成本。<br>  那么一个分类器的分类效果就对应ROC空间里的一个点:</p>
-
-
-
-
-<h3 id="roc曲线"><a href="#roc曲线" class="headerlink" title="roc曲线"></a>roc曲线</h3><blockquote>
-<p>受试者工作特征曲线（receiver operating characteristic curve）简称ROC曲线，又称感受性曲线（sensitivity curve），得此名的原因在于曲线上各点反映着相同的感受性，它们都是对同一信号刺激的反应，只不过是在几种不同的判定标准下所得的结果而已。</p>
-<p>ROC曲线上各点反映的都是相同的感受性，通过对疾病组和参照组的测定结果进行分析，确定测定值的上下限、组距以及截断点，按选择的组距间隔列出累积频数分布表，并分别计算出所有截断点的真阳性率（灵敏度）、特异性和假阳性率（1-特异性），作图绘成ROC曲线。灵敏度(sensitivity)，即敏感度，是指筛检方法能将实际有病的人正确地判定为患者的比例。特异度(specificity)，是指筛检方法能将实际无病的人正确地判定为非患者的比例。</p>
-</blockquote>
-<p>看上面的解释比较难以理解，其实它就是一个长度为1的正方形内绘制的一个曲线，横坐标是FPR，纵坐标是TPR。 显然坐标(1, 0)是所有正例全部分错，是最坏的情况，坐标(0, 1)是正例全部分对，是最好的情况，而y &#x3D; x y&#x3D;xy&#x3D;x这条线代表了随机猜测的情况，因此正常的分类器的ROC曲线应该是高于这条直线的。</p>
-
-
-<h4 id="roc曲线中的统计量"><a href="#roc曲线中的统计量" class="headerlink" title="roc曲线中的统计量"></a>roc曲线中的统计量</h4><p><strong>（1）曲线下面积（AUC）</strong></p>
-<p>AUC的值来评价诊断效果，其在1.0和0.5之间。当AUC＞0.5时，AUC越接近于1，说明诊断效果越好：AUC在 0.5～0.7时，准确性较低；在0.7～0.9时，有一定准确性；AUC在0.9以上时，准确性较高。AUC＝0.5时，说明诊断方法完全不起作用，无诊断价值。AUC＜0.5不符合真实情况，在实际中极少出现。 </p>
-<p><strong>（2）约登指数、灵敏度和特异度</strong></p>
-<p>约登指数（Youden Index），也称正确指数，是在假定假阴性（漏诊率）和假阳性（误诊率）的危害性有同等意义时常用的方法，其反映了真正的患者与非患者的总能力。约登指数是灵敏度与特异度的和减去1，约登指数越大说明真实性越大。同时，约登指数最大值对应的检验变量值是该方法的诊断临界值。</p>
-<h1 id="如何用Spark-MLliib快速输出以上指标"><a href="#如何用Spark-MLliib快速输出以上指标" class="headerlink" title="如何用Spark MLliib快速输出以上指标"></a>如何用Spark MLliib快速输出以上指标</h1><p>​        从指标介绍一节，我们发现所有指标都可以用混淆矩阵算出来，SparkMLlib也不例外，我们这里使用封装好的评估器： BinaryClassificationMetrics类。它的构造非常简单，只需把模型的预测值和对应样本实际的类别标签(例如0&#x2F;1)构成的一个RDD[(Double, Double)]传给它即可:</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"> <span class="keyword">val</span> predictionAndLabel: <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)]=... ...<span class="comment">//第一列是模型输出值，第二列是对应样本实际label </span></span><br><span class="line"><span class="keyword">val</span> metrics = <span class="keyword">new</span> <span class="type">BinaryClassificationMetrics</span>(predictionAndLabel)</span><br></pre></td></tr></table></figure>
-
-<p>那如何利用它输出模型指标呢？它有多个API分别输出不同的指标，但实际上它们是相互对应的，我们不想做选择，我们全都要。该怎么办？我们仔细观察API的名称发现都有一个后缀ByThreshold：</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// Precision by threshold</span></span><br><span class="line"> <span class="keyword">val</span> precision: <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)] = metrics.precisionByThreshold</span><br><span class="line"></span><br><span class="line"></span><br><span class="line"> <span class="comment">// Recall by threshold</span></span><br><span class="line"> <span class="keyword">val</span> recall: <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)] = metrics.recallByThreshold</span><br><span class="line"></span><br><span class="line"></span><br><span class="line"> <span class="comment">// F-measure</span></span><br><span class="line"> <span class="keyword">val</span> f1Score: <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)] = metrics.fMeasureByThreshold</span><br><span class="line"></span><br><span class="line"> <span class="comment">// AUROC</span></span><br><span class="line"> <span class="keyword">val</span> auROC: <span class="type">Double</span> = metrics.areaUnderROC</span><br><span class="line"> println(<span class="string">s&quot;Area under ROC = <span class="subst">$auROC</span>&quot;</span>)</span><br></pre></td></tr></table></figure>
-
-<p>也就是说这些API返回的RDD的第一列都是Threshold(阈值)，第二列就是对应的指标。那这就好办了，利用第一列做一个Join就OK了，如下Demo:</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">val</span> score_detail=precision</span><br><span class="line">  .join(recall)</span><br><span class="line">  .map(r=&gt;&#123;</span><br><span class="line">    (r._1,(r._2._1,r._2._2))</span><br><span class="line">  &#125;)</span><br><span class="line">  .join(f1Score)</span><br><span class="line">  .map(r=&gt;&#123;</span><br><span class="line">    (r._1,r._2._1._1,r._2._1._2,  r._2._2).productIterator.mkString(<span class="string">&quot;\t&quot;</span>)</span><br><span class="line">  &#125;)</span><br></pre></td></tr></table></figure>
-
-<p>结果样本如下：</p>
-<figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br></pre></td><td class="code"><pre><span class="line">threshold  <span class="keyword">Precision</span> Recall F1</span><br><span class="line"><span class="number">6.365176629076281E-12</span>	<span class="number">0.7561862960964727</span>	<span class="number">0.9999614350035191</span>	<span class="number">0.8611543555062915</span></span><br><span class="line"><span class="number">3.097279694579637E-4</span>	<span class="number">0.7291075153405294</span>	<span class="number">0.8677750889405231</span>	<span class="number">0.7924206040890353</span></span><br><span class="line"><span class="number">6.350647369629516E-4</span>	<span class="number">0.695262308975095</span>	<span class="number">0.7355887428775272</span>	<span class="number">0.7148572552914391</span></span><br><span class="line"><span class="number">0.9721426745277615</span>	<span class="number">0.008313885647607934</span>	<span class="number">0.001099102399706906</span>	<span class="number">0.001941532618599542</span></span><br><span class="line"><span class="number">0.8430009613296399</span>	<span class="number">0.035493573967733116</span>	<span class="number">0.009385756018549763</span>	<span class="number">0.014845766440332905</span></span><br><span class="line"><span class="number">0.008071787729025235</span>	<span class="number">0.3905411194254309</span>	<span class="number">0.20655894177649656</span>	<span class="number">0.2702051652325805</span></span><br><span class="line"><span class="number">1.0795658583372632E-50</span>	<span class="number">0.7561934063370321</span>	<span class="number">1.0</span>	<span class="number">0.8611732666896377</span></span><br><span class="line"><span class="number">0.0011511886942443803</span>	<span class="number">0.6517732084372543</span>	<span class="number">0.6034216793127718</span>	<span class="number">0.6266661660346188</span></span><br><span class="line"><span class="number">0.0036471920621223993</span>	<span class="number">0.5125586751800344</span>	<span class="number">0.3389911396920585</span>	<span class="number">0.4080861657739425</span></span><br><span class="line"><span class="number">0.07184260932552915</span>	<span class="number">0.188501780267587</span>	<span class="number">0.07477752817655055</span>	<span class="number">0.10707789585583967</span></span><br><span class="line"><span class="number">0.0020346200784585634</span>	<span class="number">0.59378245895366</span>	<span class="number">0.47124015387433593</span>	<span class="number">0.5254614013916624</span></span><br></pre></td></tr></table></figure>
-
-
-
-<p>但是，我要说但是了，如果你这么做，它输出的结果会出乎你的意料:</p>
-<ol>
-<li>首先是评估耗时长</li>
-<li>再就是结果集非常大，甚至和样本集一样大！ 这显然不是我们想要的。因为就算我们要画ROC曲线，那也只需要几十个点就OK了</li>
-<li>除此之外，还有一个困惑点，我们只是想要一些指标而已，它为什么会返回一个RDD？</li>
-</ol>
-<p>查看了该类的源码注释:</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">/**</span></span><br><span class="line"><span class="comment"> * Evaluator for binary classification.</span></span><br><span class="line"><span class="comment"> *</span></span><br><span class="line"><span class="comment"> * @param scoreAndLabels an RDD of (score, label) or (score, label, weight) tuples.</span></span><br><span class="line"><span class="comment"> * @param numBins if greater than 0, then the curves (ROC curve, PR curve) computed internally</span></span><br><span class="line"><span class="comment"> *                will be down-sampled to this many &quot;bins&quot;. If 0, no down-sampling will occur.</span></span><br><span class="line"><span class="comment"> *                This is useful because the curve contains a point for each distinct score</span></span><br><span class="line"><span class="comment"> *                in the input, and this could be as large as the input itself -- millions of</span></span><br><span class="line"><span class="comment"> *                points or more, when thousands may be entirely sufficient to summarize</span></span><br><span class="line"><span class="comment"> *                the curve. After down-sampling, the curves will instead be made of approximately</span></span><br><span class="line"><span class="comment"> *                `numBins` points instead. Points are made from bins of equal numbers of</span></span><br><span class="line"><span class="comment"> *                consecutive points. The size of each bin is</span></span><br><span class="line"><span class="comment"> *                `floor(scoreAndLabels.count() / numBins)`, which means the resulting number</span></span><br><span class="line"><span class="comment"> *                of bins may not exactly equal numBins. The last bin in each partition may</span></span><br><span class="line"><span class="comment"> *                be smaller as a result, meaning there may be an extra sample at</span></span><br><span class="line"><span class="comment"> *                partition boundaries.</span></span><br><span class="line"><span class="comment"> */</span></span><br><span class="line"><span class="meta">@Since</span>(<span class="string">&quot;1.0.0&quot;</span>)</span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">BinaryClassificationMetrics</span> <span class="title">@Since</span>(<span class="params">&quot;3.0.0&quot;</span>) (<span class="params"></span></span></span><br><span class="line"><span class="params"><span class="class">    @<span class="type">Since</span>(&quot;1.3.0&quot;</span>) <span class="title">val</span> <span class="title">scoreAndLabels</span></span>: <span class="type">RDD</span>[_ &lt;: <span class="type">Product</span>],</span><br><span class="line">    <span class="meta">@Since</span>(<span class="string">&quot;1.3.0&quot;</span>) <span class="keyword">val</span> numBins: <span class="type">Int</span> = <span class="number">1000</span>)</span><br></pre></td></tr></table></figure>
-
-<p>通过它的源码注释，我们发现，它还有一个可选的Int型参数numBins，它是一个分箱参数，通俗的讲就是把模型输出值，也就是我们的scoreAndLabels中的第一列，分到numBins个箱子里，但最终可能不是严格的numBins个箱子，因为每个箱子的大小是这么算的:</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">floor(scoreAndLabels.count() / numBins)</span><br></pre></td></tr></table></figure>
-
-<p>向下取整，可能就需要多一个箱子才能装完。</p>
-<p>好了， 假设我们绘制roc曲线需要20个(FPR,TPR)点，那numBins指定为20吧:</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"> <span class="keyword">val</span> predictionAndLabel: <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)]=... ...<span class="comment">//第一列是模型输出值，第二列是对应样本实际label </span></span><br><span class="line"><span class="keyword">val</span> metrics = <span class="keyword">new</span> <span class="type">BinaryClassificationMetrics</span>(predictionAndLabel,numBins=<span class="number">20</span>)</span><br></pre></td></tr></table></figure>
-
-<p>不幸的是，令人困惑的事情又发生了，输出的结果是大大减少了，但也不是20个或者21个，可能是上百个！ </p>
-<p>额….. , 虽然也能用，但我还是想较真儿一下，再次仔细阅读了注释，发现可能跟分区数有关，再次尝试：</p>
-<figure class="highlight scala"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"> <span class="keyword">val</span> predictionAndLabel: <span class="type">RDD</span>[(<span class="type">Double</span>, <span class="type">Double</span>)]=... ...<span class="comment">//第一列是模型输出值，第二列是对应样本实际label </span></span><br><span class="line"><span class="keyword">val</span> metrics = <span class="keyword">new</span> <span class="type">BinaryClassificationMetrics</span>(predictionAndLabel.repartition(<span class="number">1</span>),numBins=<span class="number">20</span>)</span><br></pre></td></tr></table></figure>
-
-<p>Good!, 这样就严格输出20或者21个指标集了，而且计算速度很快！</p>
-<h1 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h1><p>对模型输出值做重分区，且传入我们想要的分箱参数，通过阈值把关系的指标关联起来。</p>
-<p>最后，我们发现全程我们不需要操心这一堆混淆矩阵如何构建，如何计算这些指标，Spark MLlib是如何做到的呢？由于篇幅有限，留做下次总结</p>
-<p>完！</p>
-
-      
-    </div>
-
-    
-    
-    
-
-    <footer class="post-footer">
-        <div class="post-eof"></div>
-      
-    </footer>
-  </article>
-</div>
-
-
-
-
-    
-
-
-<div class="post-block">
-  
-  
-
-  <article itemscope itemtype="http://schema.org/Article" class="post-content" lang="">
-    <link itemprop="mainEntityOfPage" href="http://example.com/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/">
-
-    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
-      <meta itemprop="image" content="/images/avatar.gif">
-      <meta itemprop="name" content="Xingfu Cheng">
-    </span>
-
-    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
-      <meta itemprop="name" content="LuckyWind">
-      <meta itemprop="description" content="微信公众号《大数据那点事儿》">
-    </span>
-
-    <span hidden itemprop="post" itemscope itemtype="http://schema.org/CreativeWork">
-      <meta itemprop="name" content="undefined | LuckyWind">
-      <meta itemprop="description" content="">
-    </span>
-      <header class="post-header">
-        <h2 class="post-title" itemprop="name headline">
-          <a href="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/" class="post-title-link" itemprop="url">hexo博客添加评论/打赏/RSS</a>
-        </h2>
-
-        <div class="post-meta-container">
-          <div class="post-meta">
-    <span class="post-meta-item">
-      <span class="post-meta-item-icon">
-        <i class="far fa-calendar"></i>
-      </span>
-      <span class="post-meta-item-text">发表于</span>
-      
-
-      <time title="创建时间：2022-04-15 22:56:07 / 修改时间：23:15:29" itemprop="dateCreated datePublished" datetime="2022-04-15T22:56:07+08:00">2022-04-15</time>
-    </span>
-
-  
-  
-  <span class="post-meta-item">
-    
-    <span class="post-meta-item-icon">
-      <i class="far fa-comment"></i>
-    </span>
-    <span class="post-meta-item-text">Waline：</span>
-  
-    <a title="waline" href="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/#waline-comments" itemprop="discussionUrl">
-      <span class="post-comments-count waline-comment-count" id="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/" data-xid="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/" itemprop="commentCount"></span>
-    </a>
-  </span>
-  
-  
-    <span id="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/" class="post-meta-item leancloud_visitors" data-flag-title="hexo博客添加评论/打赏/RSS" title="阅读次数">
-      <span class="post-meta-item-icon">
-        <i class="far fa-eye"></i>
-      </span>
-      <span class="post-meta-item-text">阅读次数：</span>
-      <span class="leancloud-visitors-count"></span>
-    </span>
-  
-</div>
-
-        </div>
-      </header>
-
-    
-    
-    
-    <div class="post-body" itemprop="articleBody">
-          <h1 id="Saline"><a href="#Saline" class="headerlink" title="Saline"></a>Saline</h1>
+          <p>Spark-MLlib分类模型评估器最，你真的理解了吗？</p>
+          <!--noindex-->
+            <div class="post-button">
+              <a class="btn" href="/2022/06/07/Spark-MLlib%E5%88%86%E7%B1%BB%E6%A8%A1%E5%9E%8B%E8%AF%84%E4%BC%B0%E5%99%A8%E6%9C%80%E4%BD%B3%E5%AE%9E%E8%B7%B5/">
+                阅读全文 &raquo;
+              </a>
+            </div>
+          <!--/noindex-->
+        
       
     </div>
 
@@ -629,9 +421,15 @@
         <i class="far fa-calendar"></i>
       </span>
       <span class="post-meta-item-text">发表于</span>
-      
 
-      <time title="创建时间：2022-04-15 22:54:39 / 修改时间：22:55:02" itemprop="dateCreated datePublished" datetime="2022-04-15T22:54:39+08:00">2022-04-15</time>
+      <time title="创建时间：2022-04-15 22:56:07" itemprop="dateCreated datePublished" datetime="2022-04-15T22:56:07+08:00">2022-04-15</time>
+    </span>
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar-check"></i>
+      </span>
+      <span class="post-meta-item-text">更新于</span>
+      <time title="修改时间：2022-06-26 21:06:07" itemprop="dateModified" datetime="2022-06-26T21:06:07+08:00">2022-06-26</time>
     </span>
 
   
@@ -666,20 +464,120 @@
     
     
     <div class="post-body" itemprop="articleBody">
-          <p>Welcome to <a target="_blank" rel="noopener" href="https://hexo.io/">Hexo</a>! This is your very first post. Check <a target="_blank" rel="noopener" href="https://hexo.io/docs/">documentation</a> for more info. If you get any problems when using Hexo, you can find the answer in <a target="_blank" rel="noopener" href="https://hexo.io/docs/troubleshooting.html">troubleshooting</a> or you can ask me on <a target="_blank" rel="noopener" href="https://github.com/hexojs/hexo/issues">GitHub</a>.</p>
-<h2 id="Quick-Start"><a href="#Quick-Start" class="headerlink" title="Quick Start"></a>Quick Start</h2><h3 id="Create-a-new-post"><a href="#Create-a-new-post" class="headerlink" title="Create a new post"></a>Create a new post</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$ hexo new <span class="string">&quot;My New Post&quot;</span></span><br></pre></td></tr></table></figure>
+          <p>示例文档摘要</p>
+          <!--noindex-->
+            <div class="post-button">
+              <a class="btn" href="/2022/04/15/hello-world/">
+                阅读全文 &raquo;
+              </a>
+            </div>
+          <!--/noindex-->
+        
+      
+    </div>
 
-<p>More info: <a target="_blank" rel="noopener" href="https://hexo.io/docs/writing.html">Writing</a></p>
-<h3 id="Run-server"><a href="#Run-server" class="headerlink" title="Run server"></a>Run server</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$ hexo server</span><br></pre></td></tr></table></figure>
+    
+    
+    
 
-<p>More info: <a target="_blank" rel="noopener" href="https://hexo.io/docs/server.html">Server</a></p>
-<h3 id="Generate-static-files"><a href="#Generate-static-files" class="headerlink" title="Generate static files"></a>Generate static files</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$ hexo generate</span><br></pre></td></tr></table></figure>
+    <footer class="post-footer">
+        <div class="post-eof"></div>
+      
+    </footer>
+  </article>
+</div>
 
-<p>More info: <a target="_blank" rel="noopener" href="https://hexo.io/docs/generating.html">Generating</a></p>
-<h3 id="Deploy-to-remote-sites"><a href="#Deploy-to-remote-sites" class="headerlink" title="Deploy to remote sites"></a>Deploy to remote sites</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$ hexo deploy</span><br></pre></td></tr></table></figure>
 
-<p>More info: <a target="_blank" rel="noopener" href="https://hexo.io/docs/one-command-deployment.html">Deployment</a></p>
 
+
+    
+
+
+<div class="post-block">
+  
+  
+
+  <article itemscope itemtype="http://schema.org/Article" class="post-content" lang="">
+    <link itemprop="mainEntityOfPage" href="http://example.com/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/avatar.gif">
+      <meta itemprop="name" content="Xingfu Cheng">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="LuckyWind">
+      <meta itemprop="description" content="微信公众号《大数据那点事儿》">
+    </span>
+
+    <span hidden itemprop="post" itemscope itemtype="http://schema.org/CreativeWork">
+      <meta itemprop="name" content="undefined | LuckyWind">
+      <meta itemprop="description" content="">
+    </span>
+      <header class="post-header">
+        <h2 class="post-title" itemprop="name headline">
+          <a href="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/" class="post-title-link" itemprop="url">hexo博客添加评论/打赏/RSS</a>
+        </h2>
+
+        <div class="post-meta-container">
+          <div class="post-meta">
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar"></i>
+      </span>
+      <span class="post-meta-item-text">发表于</span>
+
+      <time title="创建时间：2022-04-15 22:56:07" itemprop="dateCreated datePublished" datetime="2022-04-15T22:56:07+08:00">2022-04-15</time>
+    </span>
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar-check"></i>
+      </span>
+      <span class="post-meta-item-text">更新于</span>
+      <time title="修改时间：2022-06-26 21:09:02" itemprop="dateModified" datetime="2022-06-26T21:09:02+08:00">2022-06-26</time>
+    </span>
+
+  
+  
+  <span class="post-meta-item">
+    
+    <span class="post-meta-item-icon">
+      <i class="far fa-comment"></i>
+    </span>
+    <span class="post-meta-item-text">Waline：</span>
+  
+    <a title="waline" href="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/#waline-comments" itemprop="discussionUrl">
+      <span class="post-comments-count waline-comment-count" id="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/" data-xid="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/" itemprop="commentCount"></span>
+    </a>
+  </span>
+  
+  
+    <span id="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/" class="post-meta-item leancloud_visitors" data-flag-title="hexo博客添加评论/打赏/RSS" title="阅读次数">
+      <span class="post-meta-item-icon">
+        <i class="far fa-eye"></i>
+      </span>
+      <span class="post-meta-item-text">阅读次数：</span>
+      <span class="leancloud-visitors-count"></span>
+    </span>
+  
+</div>
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+          <p>添加评论、打赏、RSS功能</p>
+          <!--noindex-->
+            <div class="post-button">
+              <a class="btn" href="/2022/04/15/hexo%E5%8D%9A%E5%AE%A2%E6%B7%BB%E5%8A%A0%E8%AF%84%E8%AE%BA-%E6%89%93%E8%B5%8F-RSS/">
+                阅读全文 &raquo;
+              </a>
+            </div>
+          <!--/noindex-->
+        
       
     </div>
 
