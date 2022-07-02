@@ -20,25 +20,27 @@
 
 <script class="next-config" data-name="main" type="application/json">{"hostname":"example.com","root":"/","images":"/images","scheme":"Pisces","darkmode":false,"version":"8.11.0","exturl":false,"sidebar":{"position":"left","display":"post","padding":18,"offset":12},"copycode":false,"bookmark":{"enable":true,"color":"#222","save":"auto"},"mediumzoom":false,"lazyload":false,"pangu":false,"comments":{"style":"tabs","active":null,"storage":true,"lazyload":false,"nav":null},"stickytabs":false,"motion":{"enable":true,"async":false,"transition":{"post_block":"fadeIn","post_header":"fadeInDown","post_body":"fadeInDown","coll_header":"fadeInLeft","sidebar":"fadeInUp"}},"prism":false,"i18n":{"placeholder":"搜索...","empty":"没有找到任何搜索结果：${query}","hits_time":"找到 ${hits} 个搜索结果（用时 ${time} 毫秒）","hits":"找到 ${hits} 个搜索结果"}}</script><script src="/js/config.js"></script>
 
-    <meta name="description" content="微信公众号《大数据那点事儿》">
-<meta property="og:type" content="website">
-<meta property="og:title" content="大数据那点事儿">
-<meta property="og:url" content="http://example.com/archives/index.html">
+    <meta name="description" content="什么是udf&#x2F;udaf&#x2F;udtf? 本文重点讲udf,下期讲udaf 如何创建udf? 如何注册udf？ https:&#x2F;&#x2F;www.cnblogs.com&#x2F;itboys&#x2F;p&#x2F;9347403.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Spark Udf使用总结">
+<meta property="og:url" content="http://example.com/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/index.html">
 <meta property="og:site_name" content="大数据那点事儿">
-<meta property="og:description" content="微信公众号《大数据那点事儿》">
+<meta property="og:description" content="什么是udf&#x2F;udaf&#x2F;udtf? 本文重点讲udf,下期讲udaf 如何创建udf? 如何注册udf？ https:&#x2F;&#x2F;www.cnblogs.com&#x2F;itboys&#x2F;p&#x2F;9347403.html">
 <meta property="og:locale" content="zh_CN">
+<meta property="article:published_time" content="2022-06-30T02:02:51.000Z">
+<meta property="article:modified_time" content="2022-06-30T09:39:50.984Z">
 <meta property="article:author" content="Xingfu Cheng">
 <meta name="twitter:card" content="summary">
 
 
-<link rel="canonical" href="http://example.com/archives/">
+<link rel="canonical" href="http://example.com/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/">
 
 
 
-<script class="next-config" data-name="page" type="application/json">{"sidebar":"","isHome":false,"isPost":false,"lang":"zh-CN","comments":"","permalink":"","path":"archives/index.html","title":""}</script>
+<script class="next-config" data-name="page" type="application/json">{"sidebar":"","isHome":false,"isPost":true,"lang":"zh-CN","comments":true,"permalink":"http://example.com/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/","path":"2022/06/30/Spark-Udf使用总结/","title":"Spark Udf使用总结"}</script>
 
 <script class="next-config" data-name="calendar" type="application/json">""</script>
-<title>归档 | 大数据那点事儿</title>
+<title>Spark Udf使用总结 | 大数据那点事儿</title>
   
 
 
@@ -68,7 +70,7 @@
 
     <a href="/" class="brand" rel="start">
       <i class="logo-line"></i>
-      <h1 class="site-title">大数据那点事儿</h1>
+      <p class="site-title">大数据那点事儿</p>
       <i class="logo-line"></i>
     </a>
   </div>
@@ -178,170 +180,121 @@
 </noscript>
 
 
-    <div class="main-inner archive posts-collapse">
+    <div class="main-inner post posts-expand">
 
 
   
-  
-  
-  <div class="post-block">
-    <div class="post-content">
-      <div class="collection-title">
-        <span class="collection-header">嗯..! 目前共计 7 篇日志。 继续努力。</span>
-      </div>
 
+
+<div class="post-block">
+  
+  
+
+  <article itemscope itemtype="http://schema.org/Article" class="post-content" lang="zh-CN">
+    <link itemprop="mainEntityOfPage" href="http://example.com/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/qrcode_for_gh_26769615b98a_344.jpg">
+      <meta itemprop="name" content="Xingfu Cheng">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="大数据那点事儿">
+      <meta itemprop="description" content="微信公众号《大数据那点事儿》">
+    </span>
+
+    <span hidden itemprop="post" itemscope itemtype="http://schema.org/CreativeWork">
+      <meta itemprop="name" content="Spark Udf使用总结 | 大数据那点事儿">
+      <meta itemprop="description" content="">
+    </span>
+      <header class="post-header">
+        <h1 class="post-title" itemprop="name headline">
+          Spark Udf使用总结
+        </h1>
+
+        <div class="post-meta-container">
+          <div class="post-meta">
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar"></i>
+      </span>
+      <span class="post-meta-item-text">发表于</span>
       
-    <div class="collection-year">
-      <span class="collection-header">2022</span>
+
+      <time title="创建时间：2022-06-30 10:02:51 / 修改时间：17:39:50" itemprop="dateCreated datePublished" datetime="2022-06-30T10:02:51+08:00">2022-06-30</time>
+    </span>
+
+  
+  
+  <span class="post-meta-item">
+    
+    <span class="post-meta-item-icon">
+      <i class="far fa-comment"></i>
+    </span>
+    <span class="post-meta-item-text">Waline：</span>
+  
+    <a title="waline" href="/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/#waline-comments" itemprop="discussionUrl">
+      <span class="post-comments-count waline-comment-count" id="/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/" data-xid="/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/" itemprop="commentCount"></span>
+    </a>
+  </span>
+  
+  
+    <span id="/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/" class="post-meta-item leancloud_visitors" data-flag-title="Spark Udf使用总结" title="阅读次数">
+      <span class="post-meta-item-icon">
+        <i class="far fa-eye"></i>
+      </span>
+      <span class="post-meta-item-text">阅读次数：</span>
+      <span class="leancloud-visitors-count"></span>
+    </span>
+  
+</div>
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+        <ol>
+<li>什么是udf&#x2F;udaf&#x2F;udtf? 本文重点讲udf,下期讲udaf</li>
+<li>如何创建udf?</li>
+<li>如何注册udf？ <a target="_blank" rel="noopener" href="https://www.cnblogs.com/itboys/p/9347403.html">https://www.cnblogs.com/itboys/p/9347403.html</a></li>
+<li></li>
+</ol>
+
     </div>
 
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-      <div class="post-meta-container">
-        <time itemprop="dateCreated"
-              datetime="2022-07-02T20:20:00+08:00"
-              content="2022-07-02">
-          07-02
-        </time>
-      </div>
+    
+    
+    
 
-      <div class="post-title">
-          <a class="post-title-link" href="/2022/07/02/%E8%A2%AB%E8%AE%A8%E5%8E%8C%E7%9A%84%E5%8B%87%E6%B0%94/" itemprop="url">
-            <span itemprop="name">被讨厌的勇气</span>
-          </a>
-      </div>
+    <footer class="post-footer">
 
-      
-    </header>
+        
+
+          <div class="post-nav">
+            <div class="post-nav-item">
+                <a href="/2022/06/07/Spark-MLlib%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90-%E4%B8%80-%E6%A8%A1%E5%9E%8B%E8%AF%84%E4%BC%B0%E5%99%A8%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86/" rel="prev" title="Spark MLlib源码分析(一): 模型评估器实现原理">
+                  <i class="fa fa-chevron-left"></i> Spark MLlib源码分析(一): 模型评估器实现原理
+                </a>
+            </div>
+            <div class="post-nav-item">
+                <a href="/2022/07/02/%E8%B4%AB%E7%A9%B7%E7%9A%84%E6%9C%AC%E8%B4%A8/" rel="next" title="贫穷的本质">
+                  贫穷的本质 <i class="fa fa-chevron-right"></i>
+                </a>
+            </div>
+          </div>
+    </footer>
   </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-      <div class="post-meta-container">
-        <time itemprop="dateCreated"
-              datetime="2022-07-02T19:44:14+08:00"
-              content="2022-07-02">
-          07-02
-        </time>
-      </div>
-
-      <div class="post-title">
-          <a class="post-title-link" href="/2022/07/02/%E8%9B%A4%E8%9F%86%E5%85%88%E7%94%9F%E5%8E%BB%E7%9C%8B%E5%BF%83%E9%87%8C%E5%8C%BB%E7%94%9F/" itemprop="url">
-            <span itemprop="name">蛤蟆先生去看心里医生</span>
-          </a>
-      </div>
-
-      
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-      <div class="post-meta-container">
-        <time itemprop="dateCreated"
-              datetime="2022-07-02T18:43:41+08:00"
-              content="2022-07-02">
-          07-02
-        </time>
-      </div>
-
-      <div class="post-title">
-          <a class="post-title-link" href="/2022/07/02/%E8%B4%AB%E7%A9%B7%E7%9A%84%E6%9C%AC%E8%B4%A8/" itemprop="url">
-            <span itemprop="name">贫穷的本质</span>
-          </a>
-      </div>
-
-      
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-      <div class="post-meta-container">
-        <time itemprop="dateCreated"
-              datetime="2022-06-30T10:02:51+08:00"
-              content="2022-06-30">
-          06-30
-        </time>
-      </div>
-
-      <div class="post-title">
-          <a class="post-title-link" href="/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/" itemprop="url">
-            <span itemprop="name">Spark Udf使用总结</span>
-          </a>
-      </div>
-
-      
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-      <div class="post-meta-container">
-        <time itemprop="dateCreated"
-              datetime="2022-06-07T08:49:33+08:00"
-              content="2022-06-07">
-          06-07
-        </time>
-      </div>
-
-      <div class="post-title">
-          <a class="post-title-link" href="/2022/06/07/Spark-MLlib%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90-%E4%B8%80-%E6%A8%A1%E5%9E%8B%E8%AF%84%E4%BC%B0%E5%99%A8%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86/" itemprop="url">
-            <span itemprop="name">Spark MLlib源码分析(一): 模型评估器实现原理</span>
-          </a>
-      </div>
-
-      
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-      <div class="post-meta-container">
-        <time itemprop="dateCreated"
-              datetime="2022-06-07T07:04:08+08:00"
-              content="2022-06-07">
-          06-07
-        </time>
-      </div>
-
-      <div class="post-title">
-          <a class="post-title-link" href="/2022/06/07/Spark-MLlib%E5%88%86%E7%B1%BB%E6%A8%A1%E5%9E%8B%E8%AF%84%E4%BC%B0%E5%99%A8%E6%9C%80%E4%BD%B3%E5%AE%9E%E8%B7%B5/" itemprop="url">
-            <span itemprop="name">Spark-MLlib分类模型评估器最佳实践</span>
-          </a>
-      </div>
-
-      
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-      <div class="post-meta-container">
-        <time itemprop="dateCreated"
-              datetime="2022-04-15T22:56:07+08:00"
-              content="2022-04-15">
-          04-15
-        </time>
-      </div>
-
-      <div class="post-title">
-          <a class="post-title-link" href="/2022/04/15/hello-world/" itemprop="url">
-            <span itemprop="name">Hello World</span>
-          </a>
-      </div>
-
-      
-    </header>
-  </article>
+</div>
 
 
-    </div>
-  </div>
-  
-  
-  
 
+
+
+
+    <div class="comments" id="waline-comments"></div>
 </div>
   </main>
 
@@ -378,7 +331,7 @@
 
 
 
-<script class="next-config" data-name="waline" type="application/json">{"lang":"zh-cn","enable":true,"serverURL":"https://my-waline-9yd7e2x5u-luckywind.vercel.app/","placeholder":"请文明评论呀","avatar":"mm","pageSize":10,"visitor":true,"comment_count":true,"requiredFields":[],"meta":["nick","mail","link"],"el":"#waline-comments","libUrl":"https://cdn.jsdelivr.net/npm/@waline/client/dist/Waline.min.js","path":"/archives/"}</script>
+<script class="next-config" data-name="waline" type="application/json">{"lang":"zh-cn","enable":true,"serverURL":"https://my-waline-9yd7e2x5u-luckywind.vercel.app/","placeholder":"请文明评论呀","avatar":"mm","pageSize":10,"visitor":true,"comment_count":true,"requiredFields":[],"meta":["nick","mail","link"],"el":"#waline-comments","libUrl":"https://cdn.jsdelivr.net/npm/@waline/client/dist/Waline.min.js","path":"/2022/06/30/Spark-Udf%E4%BD%BF%E7%94%A8%E6%80%BB%E7%BB%93/"}</script>
 <script>
 document.addEventListener('page:loaded', () => {
   NexT.utils.loadComments(CONFIG.waline.el).then(() => 
